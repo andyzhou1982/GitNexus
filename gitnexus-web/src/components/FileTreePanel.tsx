@@ -14,6 +14,8 @@ import {
   Variable,
   Hash,
   Target,
+  Layers,
+  RefreshCw,
 } from 'lucide-react';
 import { useAppState } from '../hooks/useAppState';
 import { FILTERABLE_LABELS, NODE_COLORS, ALL_EDGE_TYPES, EDGE_INFO, type EdgeType } from '../lib/constants';
@@ -195,7 +197,24 @@ interface FileTreePanelProps {
 }
 
 export const FileTreePanel = ({ onFocusNode }: FileTreePanelProps) => {
-  const { graph, visibleLabels, toggleLabelVisibility, visibleEdgeTypes, toggleEdgeVisibility, selectedNode, setSelectedNode, openCodePanel, depthFilter, setDepthFilter } = useAppState();
+  const {
+    graph,
+    visibleLabels,
+    toggleLabelVisibility,
+    visibleEdgeTypes,
+    toggleEdgeVisibility,
+    selectedNode,
+    setSelectedNode,
+    openCodePanel,
+    depthFilter,
+    setDepthFilter,
+    // On-demand loading
+    displayedNodeIds,
+    expansionDepth,
+    setExpansionDepth,
+    expandNode,
+    clearDisplayedNodes,
+  } = useAppState();
 
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -255,15 +274,12 @@ export const FileTreePanel = ({ onFocusNode }: FileTreePanelProps) => {
 
   const handleNodeClick = useCallback((treeNode: TreeNode) => {
     if (treeNode.graphNode) {
-      // Only focus if selecting a different node
-      const isSameNode = selectedNode?.id === treeNode.graphNode.id;
-      setSelectedNode(treeNode.graphNode);
-      openCodePanel();
-      if (!isSameNode) {
-        onFocusNode(treeNode.graphNode.id);
-      }
+      // Use expandNode for on-demand loading instead of just selecting
+      expandNode(treeNode.graphNode.id);
+      // Focus on the node in the graph
+      onFocusNode(treeNode.graphNode.id);
     }
-  }, [setSelectedNode, openCodePanel, onFocusNode, selectedNode]);
+  }, [expandNode, onFocusNode]);
 
   const selectedPath = selectedNode?.properties.filePath || null;
 
@@ -452,6 +468,45 @@ export const FileTreePanel = ({ onFocusNode }: FileTreePanelProps) => {
             </div>
           </div>
 
+          {/* Expansion Depth - On-demand loading */}
+          <div className="mt-6 pt-4 border-t border-border-subtle">
+            <h3 className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-2">
+              <Layers className="w-3 h-3 inline mr-1.5" />
+              Expansion Depth
+            </h3>
+            <p className="text-[11px] text-text-muted mb-3">
+              Nodes to load when clicking a file
+            </p>
+
+            <div className="flex flex-wrap gap-1.5">
+              {[1, 2, 3].map((depth) => (
+                <button
+                  key={depth}
+                  onClick={() => setExpansionDepth(depth as 1 | 2 | 3)}
+                  className={`
+                    px-2 py-1 text-xs rounded transition-colors
+                    ${expansionDepth === depth
+                      ? 'bg-accent text-white'
+                      : 'bg-elevated text-text-secondary hover:bg-hover hover:text-text-primary'
+                    }
+                  `}
+                >
+                  {depth} layer{depth > 1 ? 's' : ''}
+                </button>
+              ))}
+            </div>
+
+            {/* Clear displayed nodes button */}
+            {displayedNodeIds.size > 0 && (
+              <button
+                onClick={clearDisplayedNodes}
+                className="mt-3 w-full px-2 py-1.5 text-xs rounded bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 transition-colors"
+              >
+                Clear Graph ({displayedNodeIds.size} nodes)
+              </button>
+            )}
+          </div>
+
           {/* Depth Filter */}
           <div className="mt-6 pt-4 border-t border-border-subtle">
             <h3 className="text-xs font-medium text-text-secondary uppercase tracking-wide mb-2">
@@ -517,7 +572,12 @@ export const FileTreePanel = ({ onFocusNode }: FileTreePanelProps) => {
       {graph && (
         <div className="px-3 py-2 border-t border-border-subtle bg-elevated/50">
           <div className="flex items-center justify-between text-[10px] text-text-muted">
-            <span>{graph.nodes.length} nodes</span>
+            <span>
+              {displayedNodeIds.size > 0
+                ? `${displayedNodeIds.size} / ${graph.nodes.length} displayed`
+                : `${graph.nodes.length} nodes (click to load)`
+              }
+            </span>
             <span>{graph.relationships.length} edges</span>
           </div>
         </div>

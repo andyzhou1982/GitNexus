@@ -1,8 +1,15 @@
-import { useEffect, useCallback, useMemo, useState, forwardRef, useImperativeHandle } from 'react';
+import { useEffect, useCallback, useMemo, useState, forwardRef, useImperativeHandle, useRef } from 'react';
 import { ZoomIn, ZoomOut, Maximize2, Focus, RotateCcw, Play, Pause, Lightbulb, LightbulbOff } from 'lucide-react';
 import { useSigma } from '../hooks/useSigma';
 import { useAppState } from '../hooks/useAppState';
-import { knowledgeGraphToGraphology, filterGraphByDepth, SigmaNodeAttributes, SigmaEdgeAttributes } from '../lib/graph-adapter';
+import {
+  knowledgeGraphToGraphology,
+  filterGraphByDepth,
+  addNodesToGraphology,
+  updateNodeDimmedState,
+  SigmaNodeAttributes,
+  SigmaEdgeAttributes
+} from '../lib/graph-adapter';
 import { QueryFAB } from './QueryFAB';
 import Graph from 'graphology';
 
@@ -27,8 +34,17 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle>((_, ref) => {
     isAIHighlightsEnabled,
     toggleAIHighlights,
     animatedNodes,
+    // On-demand loading
+    displayedNodeIds,
   } = useAppState();
   const [hoveredNodeName, setHoveredNodeName] = useState<string | null>(null);
+
+  // Track node positions for incremental updates
+  const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  // Track previous displayedNodeIds to detect changes
+  const prevDisplayedNodeIdsRef = useRef<Set<string>>(new Set());
+  // Track community memberships
+  const communityMembershipsRef = useRef<Map<string, number>>(new Map());
 
   const effectiveHighlightedNodeIds = useMemo(() => {
     if (!isAIHighlightsEnabled) return highlightedNodeIds;
@@ -113,28 +129,88 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle>((_, ref) => {
     }
   }), [focusNode, graph, setSelectedNode, openCodePanel]);
 
-  // Update Sigma graph when KnowledgeGraph changes
+  // Initialize empty Sigma graph when KnowledgeGraph is loaded
+  // DO NOT render all nodes - wait for user to expand nodes on demand
   useEffect(() => {
     if (!graph) return;
 
     // Build communityMemberships map from MEMBER_OF relationships
-    // MEMBER_OF edges: nodeId -> communityId (stored as targetId)
     const communityMemberships = new Map<string, number>();
     graph.relationships.forEach(rel => {
       if (rel.type === 'MEMBER_OF') {
-        // Find the community node to get its index
         const communityNode = graph.nodes.find(n => n.id === rel.targetId && n.label === 'Community');
         if (communityNode) {
-          // Extract community index from id (e.g., "comm_5" -> 5)
           const communityIdx = parseInt(rel.targetId.replace('comm_', ''), 10) || 0;
           communityMemberships.set(rel.sourceId, communityIdx);
         }
       }
     });
+    communityMembershipsRef.current = communityMemberships;
 
-    const sigmaGraph = knowledgeGraphToGraphology(graph, communityMemberships);
+    // Create empty graph - nodes will be added on demand
+    const sigmaGraph = new Graph<SigmaNodeAttributes, SigmaEdgeAttributes>();
     setSigmaGraph(sigmaGraph);
+
+    // Reset positions and displayed tracking
+    nodePositionsRef.current = new Map();
+    prevDisplayedNodeIdsRef.current = new Set();
   }, [graph, setSigmaGraph]);
+
+  // Incrementally add nodes when displayedNodeIds changes
+  useEffect(() => {
+    const sigma = sigmaRef.current;
+    if (!sigma || !graph) return;
+
+    const sigmaGraph = sigma.getGraph() as Graph<SigmaNodeAttributes, SigmaEdgeAttributes>;
+
+    // If no nodes to display, clear the graph
+    if (displayedNodeIds.size === 0) {
+      // Clear all nodes from the graph
+      sigmaGraph.clear();
+      nodePositionsRef.current = new Map();
+      prevDisplayedNodeIdsRef.current = new Set();
+      sigma.refresh();
+      return;
+    }
+
+    // Find newly added nodes (in displayedNodeIds but not in prevDisplayedNodeIds)
+    const newNodeIds = new Set<string>();
+    for (const id of displayedNodeIds) {
+      if (!prevDisplayedNodeIdsRef.current.has(id)) {
+        newNodeIds.add(id);
+      }
+    }
+
+    // If there are new nodes to add
+    if (newNodeIds.size > 0) {
+      // Add nodes to the graphology graph
+      addNodesToGraphology(
+        sigmaGraph,
+        graph,
+        newNodeIds,
+        nodePositionsRef.current,
+        communityMembershipsRef.current
+      );
+
+      // Update dimmed state: new nodes are not dimmed, old nodes become dimmed
+      updateNodeDimmedState(sigmaGraph, newNodeIds, displayedNodeIds);
+
+      sigma.refresh();
+
+      // Run layout if this is the initial load
+      if (prevDisplayedNodeIdsRef.current.size === 0 && displayedNodeIds.size > 0) {
+        // Start layout for newly added nodes
+        startLayout();
+      }
+    } else if (displayedNodeIds.size > 0) {
+      // Just update dimmed state without adding new nodes
+      updateNodeDimmedState(sigmaGraph, new Set(), displayedNodeIds);
+      sigma.refresh();
+    }
+
+    // Update previous tracking
+    prevDisplayedNodeIdsRef.current = new Set(displayedNodeIds);
+  }, [graph, displayedNodeIds, sigmaRef, startLayout]);
 
   // Update node visibility when filters change
   useEffect(() => {
@@ -191,6 +267,20 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle>((_, ref) => {
         ref={containerRef}
         className="sigma-container w-full h-full cursor-grab active:cursor-grabbing"
       />
+
+      {/* Empty state - no nodes displayed */}
+      {graph && displayedNodeIds.size === 0 && (
+        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+          <div className="text-center animate-fade-in">
+            <div className="text-text-muted text-sm mb-2">
+              Click a file in the Explorer to load its connections
+            </div>
+            <div className="text-text-muted text-xs opacity-60">
+              {graph.nodes.length} nodes available
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Hovered node tooltip - only show when NOT selected */}
       {hoveredNodeName && !sigmaSelectedNode && (

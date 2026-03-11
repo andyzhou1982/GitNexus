@@ -15,6 +15,7 @@ export interface SigmaNodeAttributes {
   hidden?: boolean;
   zIndex?: number;
   highlighted?: boolean;
+  dimmed?: boolean; // On-demand loading: node is displayed but dimmed
   mass?: number; // ForceAtlas2 mass - higher = more repulsion
   community?: number; // Community index from Leiden algorithm
   communityColor?: string; // Color assigned by community
@@ -371,17 +372,210 @@ export const filterGraphByDepth = (
     filterGraphByLabels(graph, visibleLabels);
     return;
   }
-  
+
   if (selectedNodeId === null || !graph.hasNode(selectedNodeId)) {
     filterGraphByLabels(graph, visibleLabels);
     return;
   }
-  
+
   const nodesInRange = getNodesWithinHops(graph, selectedNodeId, maxHops);
-  
+
   graph.forEachNode((nodeId, attributes) => {
     const isLabelVisible = visibleLabels.includes(attributes.nodeType);
     const isInRange = nodesInRange.has(nodeId);
     graph.setNodeAttribute(nodeId, 'hidden', !isLabelVisible || !isInRange);
+  });
+};
+
+// Edge styles for addNodesToGraphology
+const EDGE_STYLES: Record<string, { color: string; sizeMultiplier: number }> = {
+  CONTAINS: { color: '#2d5a3d', sizeMultiplier: 0.4 },
+  DEFINES: { color: '#0e7490', sizeMultiplier: 0.5 },
+  IMPORTS: { color: '#1d4ed8', sizeMultiplier: 0.6 },
+  CALLS: { color: '#7c3aed', sizeMultiplier: 0.8 },
+  EXTENDS: { color: '#c2410c', sizeMultiplier: 1.0 },
+  IMPLEMENTS: { color: '#be185d', sizeMultiplier: 0.9 },
+};
+
+/**
+ * Incrementally add nodes to an existing Graphology graph for on-demand loading.
+ * Only adds nodes that don't already exist in the graph.
+ */
+export const addNodesToGraphology = (
+  graphologyGraph: Graph<SigmaNodeAttributes, SigmaEdgeAttributes>,
+  knowledgeGraph: KnowledgeGraph,
+  nodeIdsToAdd: Set<string>,
+  nodePositions: Map<string, { x: number; y: number }>,
+  communityMemberships?: Map<string, number>
+): void => {
+  // Create node lookup for efficient access
+  const nodeMap = new Map(knowledgeGraph.nodes.map(n => [n.id, n]));
+  const nodeCount = knowledgeGraph.nodes.length;
+
+  // Build parent-child map for positioning
+  const childToParent = new Map<string, string>();
+  const hierarchyRelations = new Set(['CONTAINS', 'DEFINES', 'IMPORTS']);
+
+  knowledgeGraph.relationships.forEach(rel => {
+    if (hierarchyRelations.has(rel.type)) {
+      childToParent.set(rel.targetId, rel.sourceId);
+    }
+  });
+
+  // Calculate spread based on graph size
+  const structuralSpread = Math.sqrt(nodeCount) * 40;
+  const childJitter = Math.sqrt(nodeCount) * 3;
+
+  // Calculate cluster centers for community positioning
+  const clusterCenters = new Map<number, { x: number; y: number }>();
+  if (communityMemberships && communityMemberships.size > 0) {
+    const communities = new Set(communityMemberships.values());
+    const communityCount = communities.size;
+    const clusterSpread = structuralSpread * 0.8;
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+    let idx = 0;
+    communities.forEach(communityId => {
+      const angle = idx * goldenAngle;
+      const radius = clusterSpread * Math.sqrt((idx + 1) / communityCount);
+      clusterCenters.set(communityId, {
+        x: radius * Math.cos(angle),
+        y: radius * Math.sin(angle),
+      });
+      idx++;
+    });
+  }
+  const clusterJitter = Math.sqrt(nodeCount) * 1.5;
+
+  // Add each node that doesn't already exist
+  for (const nodeId of nodeIdsToAdd) {
+    if (graphologyGraph.hasNode(nodeId)) continue;
+
+    const node = nodeMap.get(nodeId);
+    if (!node) continue;
+
+    let x: number, y: number;
+
+    // Calculate community info (needed for both existing and new positions)
+    const communityIndex = communityMemberships?.get(nodeId);
+    const symbolTypes = new Set(['Function', 'Class', 'Method', 'Interface']);
+
+    // Check if position already exists
+    const existingPos = nodePositions.get(nodeId);
+    if (existingPos) {
+      x = existingPos.x;
+      y = existingPos.y;
+    } else {
+      // Calculate new position
+      const clusterCenter = communityIndex !== undefined ? clusterCenters.get(communityIndex) : null;
+
+      if (clusterCenter && symbolTypes.has(node.label)) {
+        x = clusterCenter.x + (Math.random() - 0.5) * clusterJitter;
+        y = clusterCenter.y + (Math.random() - 0.5) * clusterJitter;
+      } else {
+        const parentId = childToParent.get(nodeId);
+        const parentPos = parentId ? nodePositions.get(parentId) : null;
+
+        if (parentPos) {
+          x = parentPos.x + (Math.random() - 0.5) * childJitter;
+          y = parentPos.y + (Math.random() - 0.5) * childJitter;
+        } else {
+          x = (Math.random() - 0.5) * structuralSpread * 0.5;
+          y = (Math.random() - 0.5) * structuralSpread * 0.5;
+        }
+      }
+
+      // Store position for future reference
+      nodePositions.set(nodeId, { x, y });
+    }
+
+    const baseSize = NODE_SIZES[node.label] || 8;
+    const scaledSize = getScaledNodeSize(baseSize, nodeCount);
+    const hasCommunity = communityIndex !== undefined;
+    const usesCommunityColor = hasCommunity && symbolTypes?.has?.(node.label);
+    const nodeColor = usesCommunityColor
+      ? getCommunityColor(communityIndex!)
+      : NODE_COLORS[node.label] || '#9ca3af';
+
+    graphologyGraph.addNode(nodeId, {
+      x,
+      y,
+      size: scaledSize,
+      color: nodeColor,
+      label: node.properties.name,
+      nodeType: node.label,
+      filePath: node.properties.filePath,
+      startLine: node.properties.startLine,
+      endLine: node.properties.endLine,
+      hidden: false,
+      dimmed: false,
+      mass: getNodeMass(node.label, nodeCount),
+      community: communityIndex,
+      communityColor: hasCommunity ? getCommunityColor(communityIndex!) : undefined,
+    });
+  }
+
+  // Add edges for newly added nodes
+  const edgeBaseSize = nodeCount > 20000 ? 0.4 : nodeCount > 5000 ? 0.6 : 1.0;
+
+  knowledgeGraph.relationships.forEach((rel) => {
+    // Only add edge if both nodes exist in the graph and at least one was just added
+    if (nodeIdsToAdd.has(rel.sourceId) || nodeIdsToAdd.has(rel.targetId)) {
+      if (graphologyGraph.hasNode(rel.sourceId) && graphologyGraph.hasNode(rel.targetId)) {
+        if (!graphologyGraph.hasEdge(rel.sourceId, rel.targetId)) {
+          const style = EDGE_STYLES[rel.type] || { color: '#4a4a5a', sizeMultiplier: 0.5 };
+          const curvature = 0.12 + (Math.random() * 0.08);
+
+          graphologyGraph.addEdge(rel.sourceId, rel.targetId, {
+            size: edgeBaseSize * style.sizeMultiplier,
+            color: style.color,
+            relationType: rel.type,
+            type: 'curved',
+            curvature: curvature,
+          });
+        }
+      }
+    }
+  });
+};
+
+/**
+ * Set dimmed state for nodes. Newly expanded nodes are not dimmed,
+ * previously displayed nodes become dimmed.
+ */
+export const updateNodeDimmedState = (
+  graph: Graph<SigmaNodeAttributes, SigmaEdgeAttributes>,
+  newlyExpandedNodeIds: Set<string>,
+  allDisplayedNodeIds: Set<string>
+): void => {
+  graph.forEachNode((nodeId) => {
+    if (!allDisplayedNodeIds.has(nodeId)) {
+      // Not in displayed set - hide it
+      graph.setNodeAttribute(nodeId, 'hidden', true);
+    } else if (newlyExpandedNodeIds.has(nodeId)) {
+      // Newly expanded - not dimmed, visible
+      graph.setNodeAttribute(nodeId, 'hidden', false);
+      graph.setNodeAttribute(nodeId, 'dimmed', false);
+    } else {
+      // Previously displayed - dimmed but visible
+      graph.setNodeAttribute(nodeId, 'hidden', false);
+      graph.setNodeAttribute(nodeId, 'dimmed', true);
+    }
+  });
+};
+
+/**
+ * Clear all dimmed states - make all displayed nodes normal
+ */
+export const clearDimmedState = (
+  graph: Graph<SigmaNodeAttributes, SigmaEdgeAttributes>,
+  displayedNodeIds: Set<string>
+): void => {
+  graph.forEachNode((nodeId) => {
+    if (displayedNodeIds.has(nodeId)) {
+      graph.setNodeAttribute(nodeId, 'hidden', false);
+      graph.setNodeAttribute(nodeId, 'dimmed', false);
+    } else {
+      graph.setNodeAttribute(nodeId, 'hidden', true);
+    }
   });
 };

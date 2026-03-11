@@ -63,6 +63,7 @@ interface UseSigmaReturn {
   containerRef: React.RefObject<HTMLDivElement>;
   sigmaRef: React.RefObject<Sigma | null>;
   setGraph: (graph: Graph<SigmaNodeAttributes, SigmaEdgeAttributes>) => void;
+  addNodes: (nodeIds: Set<string>, graphData: Graph<SigmaNodeAttributes, SigmaEdgeAttributes>) => void;
   zoomIn: () => void;
   zoomOut: () => void;
   resetZoom: () => void;
@@ -270,12 +271,21 @@ export const useSigma = (options: UseSigmaOptions = {}): UseSigmaReturn => {
       
       nodeReducer: (node, data) => {
         const res = { ...data };
-        
+
         if (data.hidden) {
           res.hidden = true;
           return res;
         }
-        
+
+        // Handle dimmed state for on-demand loading
+        // Dimmed nodes are displayed but less prominent
+        if (data.dimmed && !selectedNodeRef.current) {
+          res.color = dimColor(data.color, 0.3);
+          res.size = (data.size || 8) * 0.7;
+          res.zIndex = 0;
+          return res;
+        }
+
         const currentSelected = selectedNodeRef.current;
         const highlighted = highlightedRef.current;
         const blastRadius = blastRadiusRef.current;

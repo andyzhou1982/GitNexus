@@ -63,6 +63,13 @@ interface AppState {
   fileContents: Map<string, string>;
   setFileContents: (contents: Map<string, string>) => void;
 
+  // On-demand loading state
+  displayedNodeIds: Set<string>;
+  expansionDepth: 1 | 2 | 3;
+  setExpansionDepth: (depth: 1 | 2 | 3) => void;
+  expandNode: (nodeId: string) => void;
+  clearDisplayedNodes: () => void;
+
   // Selection
   selectedNode: GraphNode | null;
   setSelectedNode: (node: GraphNode | null) => void;
@@ -181,6 +188,10 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [fileContents, setFileContents] = useState<Map<string, string>>(new Map());
 
+  // On-demand loading state
+  const [displayedNodeIds, setDisplayedNodeIds] = useState<Set<string>>(new Set());
+  const [expansionDepth, setExpansionDepth] = useState<1 | 2 | 3>(1);
+
   // Selection
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
 
@@ -206,6 +217,60 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
 
   // Depth filter
   const [depthFilter, setDepthFilter] = useState<number | null>(null);
+
+  // On-demand loading: expand node with N-hop neighbors
+  const expandNode = useCallback((nodeId: string) => {
+    if (!graph) return;
+
+    // Get N-hop neighbors from the KnowledgeGraph relationships
+    const visited = new Set<string>();
+    const queue: { nodeId: string; depth: number }[] = [{ nodeId, depth: 0 }];
+
+    while (queue.length > 0) {
+      const { nodeId: currentId, depth } = queue.shift()!;
+
+      if (visited.has(currentId)) continue;
+      visited.add(currentId);
+
+      if (depth < expansionDepth) {
+        // Find all relationships involving this node
+        for (const rel of graph.relationships) {
+          let neighborId: string | null = null;
+
+          if (rel.sourceId === currentId) {
+            neighborId = rel.targetId;
+          } else if (rel.targetId === currentId) {
+            neighborId = rel.sourceId;
+          }
+
+          if (neighborId && !visited.has(neighborId)) {
+            queue.push({ nodeId: neighborId, depth: depth + 1 });
+          }
+        }
+      }
+    }
+
+    // Update displayed node IDs (merge with existing)
+    setDisplayedNodeIds(prev => {
+      const next = new Set(prev);
+      for (const id of visited) {
+        next.add(id);
+      }
+      return next;
+    });
+
+    // Set the selected node
+    const node = graph.nodes.find(n => n.id === nodeId);
+    if (node) {
+      setSelectedNode(node);
+      openCodePanel();
+    }
+  }, [graph, expansionDepth, setSelectedNode, openCodePanel]);
+
+  const clearDisplayedNodes = useCallback(() => {
+    setDisplayedNodeIds(new Set());
+    setSelectedNode(null);
+  }, [setSelectedNode]);
 
   // Query state
   const [highlightedNodeIds, setHighlightedNodeIds] = useState<Set<string>>(new Set());
@@ -1112,6 +1177,12 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
     toggleEdgeVisibility,
     depthFilter,
     setDepthFilter,
+    // On-demand loading
+    displayedNodeIds,
+    expansionDepth,
+    setExpansionDepth,
+    expandNode,
+    clearDisplayedNodes,
     highlightedNodeIds,
     setHighlightedNodeIds,
     aiCitationHighlightedNodeIds,
