@@ -76,6 +76,7 @@ export const loadGraphToKuzu = async (
   graph: KnowledgeGraph, 
   fileContents: Map<string, string>
 ) => {
+  
   const { conn, kuzu } = await initKuzu();
   
   try {
