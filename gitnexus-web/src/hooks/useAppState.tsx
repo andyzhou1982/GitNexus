@@ -146,6 +146,9 @@ interface AppState {
   // Debug/test methods
   testArrayParams: () => Promise<{ success: boolean; error?: string }>;
 
+  // Backend mode (connected to server, no local WASM DB)
+  isBackendMode: boolean;
+
   // LLM/Agent state
   llmSettings: LLMSettings;
   updateLLMSettings: (updates: Partial<LLMSettings>) => void;
@@ -1222,6 +1225,8 @@ export const AppStateProvider = ({ children }: { children: ReactNode }) => {
     isEmbeddingReady: embeddingStatus === 'ready',
     // Debug
     testArrayParams,
+    // Backend mode
+    isBackendMode: !!serverBaseUrl,
     // LLM/Agent state
     llmSettings,
     updateLLMSettings,
