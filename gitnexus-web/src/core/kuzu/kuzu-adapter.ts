@@ -112,8 +112,8 @@ export const loadGraphToKuzu = async (
       await conn.query(copyQuery);
     }
     
-    // 5. INSERT relations one by one (COPY doesn't work with multi-pair REL tables)
-    // Build a set of valid table names for fast lookup
+    // 5. Batch INSERT relations using UNWIND (grouped by label pair)
+    // COPY doesn't work with multi-pair REL tables, but UNWIND enables efficient batch creation
     const validTables = new Set<string>(NODE_TABLES as readonly string[]);
 
     const getNodeLabel = (nodeId: string): string => {
@@ -122,54 +122,85 @@ export const loadGraphToKuzu = async (
       return nodeId.split(':')[0];
     };
 
-    // All multi-language tables are created with backticks - must always reference them with backticks
     const escapeLabel = (label: string): string => {
       return BACKTICK_TABLES.has(label) ? `\`${label}\`` : label;
     };
 
+    // Group relations by (fromLabel, toLabel) for batch UNWIND
+    const relGroups = new Map<string, Array<{ fromId: string; toId: string; relType: string; confidence: number; reason: string; step: number }>>();
+
+    for (const line of relLines) {
+      const match = line.match(/"([^"]*)","([^"]*)","([^"]*)",([0-9.]+),"([^"]*)",([0-9-]+)/);
+      if (!match) continue;
+
+      const [, fromId, toId, relType, confidenceStr, reason, stepStr] = match;
+      const fromLabel = getNodeLabel(fromId);
+      const toLabel = getNodeLabel(toId);
+
+      if (!validTables.has(fromLabel) || !validTables.has(toLabel)) {
+        continue;
+      }
+
+      const key = `${fromLabel}::${toLabel}`;
+      const relData = {
+        fromId,
+        toId,
+        relType,
+        confidence: parseFloat(confidenceStr) || 1.0,
+        reason,
+        step: parseInt(stepStr) || 0,
+      };
+
+      const group = relGroups.get(key);
+      if (group) {
+        group.push(relData);
+      } else {
+        relGroups.set(key, [relData]);
+      }
+    }
+
     let insertedRels = 0;
     let skippedRels = 0;
     const skippedRelStats = new Map<string, number>();
-    for (const line of relLines) {
+
+    // Batch insert each group with a single UNWIND query
+    for (const [labelKey, rels] of relGroups) {
+      const [fromLabel, toLabel] = labelKey.split('::');
+
+      // Build JSON array for UNWIND parameter
+      const relsJson = rels.map(r => ({
+        from: r.fromId.replace(/\\/g, '\\\\').replace(/"/g, '\\"'),
+        to: r.toId.replace(/\\/g, '\\\\').replace(/"/g, '\\"'),
+        type: r.relType.replace(/\\/g, '\\\\').replace(/"/g, '\\"'),
+        confidence: r.confidence,
+        reason: r.reason.replace(/\\/g, '\\\\').replace(/"/g, '\\"'),
+        step: r.step,
+      }));
+
+      const unwindQuery = `
+        UNWIND ${JSON.stringify(relsJson)} AS rel
+        MATCH (a:${escapeLabel(fromLabel)} {id: rel.from}), (b:${escapeLabel(toLabel)} {id: rel.to})
+        CREATE (a)-[:${REL_TABLE_NAME} {type: rel.type, confidence: rel.confidence, reason: rel.reason, step: rel.step}]->(b)
+      `;
+
       try {
-        // Format: "from","to","type",confidence,"reason",step
-        const match = line.match(/"([^"]*)","([^"]*)","([^"]*)",([0-9.]+),"([^"]*)",([0-9-]+)/);
-        if (!match) continue;
-        
-        const [, fromId, toId, relType, confidenceStr, reason, stepStr] = match;
-
-        const fromLabel = getNodeLabel(fromId);
-        const toLabel = getNodeLabel(toId);
-
-        // Skip relationships where either node's label doesn't have a table in KuzuDB
-        // Querying a non-existent table causes a fatal native crash
-        if (!validTables.has(fromLabel) || !validTables.has(toLabel)) {
-          skippedRels++;
-          continue;
-        }
-
-        const confidence = parseFloat(confidenceStr) || 1.0;
-        const step = parseInt(stepStr) || 0;
-        
-        const insertQuery = `
-          MATCH (a:${escapeLabel(fromLabel)} {id: '${fromId.replace(/'/g, "''")}'}),
-                (b:${escapeLabel(toLabel)} {id: '${toId.replace(/'/g, "''")}'})
-          CREATE (a)-[:${REL_TABLE_NAME} {type: '${relType}', confidence: ${confidence}, reason: '${reason.replace(/'/g, "''")}', step: ${step}}]->(b)
-        `;
-        await conn.query(insertQuery);
-        insertedRels++;
+        await conn.query(unwindQuery);
+        insertedRels += rels.length;
       } catch (err) {
-        skippedRels++;
-        const match = line.match(/"([^"]*)","([^"]*)","([^"]*)",([0-9.]+),"([^"]*)"/);
-        if (match) {
-          const [, fromId, toId, relType] = match;
-          const fromLabel = getNodeLabel(fromId);
-          const toLabel = getNodeLabel(toId);
-          const key = `${relType}:${fromLabel}->` + toLabel;
-          skippedRelStats.set(key, (skippedRelStats.get(key) || 0) + 1);
-          
-          if (import.meta.env.DEV) {
-            console.warn(`⚠️ Skipped: ${key} | "${fromId}" → "${toId}" | ${err instanceof Error ? err.message : String(err)}`);
+        // Fallback: insert one by one for this group
+        for (const r of rels) {
+          try {
+            const singleQuery = `
+              MATCH (a:${escapeLabel(fromLabel)} {id: '${r.fromId.replace(/'/g, "''")}'}),
+                    (b:${escapeLabel(toLabel)} {id: '${r.toId.replace(/'/g, "''")}'})
+              CREATE (a)-[:${REL_TABLE_NAME} {type: '${r.relType}', confidence: ${r.confidence}, reason: '${r.reason.replace(/'/g, "''")}', step: ${r.step}}]->(b)
+            `;
+            await conn.query(singleQuery);
+            insertedRels++;
+          } catch (singleErr) {
+            skippedRels++;
+            const key = `${r.relType}:${fromLabel}->${toLabel}`;
+            skippedRelStats.set(key, (skippedRelStats.get(key) || 0) + 1);
           }
         }
       }
