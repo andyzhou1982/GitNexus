@@ -1,0 +1,68 @@
+{
+  "version": "2.0.0",
+  "configurations": [
+    {
+      "name": "Debug CLI (tsx - 直接运行 TS)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx"],
+      "args": ["gitnexus/src/cli/index.ts", "analyze", "."],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Debug CLI (自定义命令)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx"],
+      "args": ["gitnexus/src/cli/index.ts", "${input:command}"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Debug MCP Server",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["tsx"],
+      "args": ["gitnexus/src/cli/index.ts", "mcp"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Debug Vitest (当前文件)",
+      "type": "node",
+      "request": "launch",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["vitest", "run", "--no-file-parallelism"],
+      "args": ["${file}"],
+      "cwd": "${workspaceFolder}/gitnexus",
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Debug Compiled JS (需先 build)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/gitnexus/dist/cli/index.js",
+      "args": ["analyze", "."],
+      "cwd": "${workspaceFolder}/gitnexus",
+      "console": "integratedTerminal",
+      "sourceMaps": true,
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "command",
+      "type": "promptString",
+      "description": "输入 gitnexus 命令和参数",
+      "default": "status"
+    }
+  ]
+}
